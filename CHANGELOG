@@ -1,0 +1,3 @@
+* 23. Oct. 2009, beta2
+  Rewrote the ftp backend to avoid problems when performing to many
+  operations.
