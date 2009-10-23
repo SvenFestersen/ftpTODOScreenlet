@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-#       backend_xml.py
+#       backend_ftp.py
 #       
 #       Copyright 2009 Sven Festersen <sven@sven-festersen.de>
 #       
@@ -21,6 +21,7 @@
 import ftplib
 import hashlib
 import os
+import Queue
 import threading
 import time
 from xml.dom.minidom import parse
@@ -38,8 +39,9 @@ def getText(nodelist):
         if node.nodeType == node.TEXT_NODE:
             rc = rc + node.data
     return rc
-
-def load_tasks(filename):
+    
+    
+def load_tasks_from_file(filename):
     tasks = {}
     dom = parse(filename)
     node_tasklist = dom.getElementsByTagName("tasklist")[0]
@@ -52,169 +54,92 @@ def load_tasks(filename):
         tasks[id] = (title, done, date, comment)
     return tasks
     
-
-def save_tasks(filename, tasks):
-    xmldata = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<tasklist>\n'
-    for id, t in tasks.iteritems():
-        title, done, date, comment = t
-        if done:
-            done = "1"
-        else:
-            done = "0"
-        taskdata = '\t<task id="%s" done="%s" date="%s">\n' % (id, done, date)
-        taskdata += '\t\t<title>%s</title>\n' % title
-        taskdata += '\t\t<comment>\n%s\n\t\t</comment>\n' % comment
-        taskdata += '\t</task>\n'
-        xmldata += taskdata
-    xmldata += '</tasklist>'
-    f = open(filename, "w")
-    f.write(xmldata)
-    f.close()
-
-
-class ThreadLoad(threading.Thread):
     
-    def __init__(self, tempfilename, hostname, hostdir, username, password, cb_tasks_loaded, cb_error):
+class FTPLoader(threading.Thread):
+    
+    def __init__(self, localfile, hostname, hostdir, hostfilename, username, password, cb_tasks_loaded, cb_error):
         threading.Thread.__init__(self)
-        self._tempfilename = tempfilename
+        self._localfile = localfile
         self._hostname = hostname
         self._hostdir = hostdir
+        self._hostfilename = hostfilename
         self._username = username
         self._password = password
         self._cb_tl = cb_tasks_loaded
         self._cb_te = cb_error
         
+        self._command_queue = Queue.Queue()
+        self.start()
+        
     def run(self):
         try:
             ftp = ftplib.FTP(self._hostname, self._username, self._password)
-            ftp.cwd(self._hostdir)
-            
-            os.unlink(self._tempfilename)
-            
-            if "tasks.xml" in ftp.nlst():
-                ftp.retrbinary("RETR tasks.xml", self._cb_retrline)
-                ftp.quit()
-            else:
-                f = open(self._tempfilename, "w")
-                f.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<tasklist>\n</tasklist>')
-                f.close()
-            
-            tasks = {}
-            dom = parse(self._tempfilename)
-            node_tasklist = dom.getElementsByTagName("tasklist")[0]
-            for node_task in node_tasklist.getElementsByTagName("task"):
-                id = node_task.getAttribute("id")
-                done = (node_task.getAttribute("done") == "1")
-                date = int(node_task.getAttribute("date"))
-                title = getText(node_task.getElementsByTagName("title")[0].childNodes).strip()
-                comment = getText(node_task.getElementsByTagName("comment")[0].childNodes).strip()
-                tasks[id] = (title, done, date, comment)
-            self._cb_tl(tasks)
         except:
             self._cb_te("Error connecting to server.")
+            return
+            
+        try:
+            ftp.cwd(self._hostdir)
+        except:
+            self._cb_te("The direectory '%s' does not exists on the server." % self._hostdir)
+            ftp.quit()
+            return
+            
+        while True:
+            command = self._command_queue.get()
+            if command == "quit":
+                break
+            elif command == "upload":
+                ftp.storbinary("STOR %s" % self._hostfilename, open(self._localfile, "rb"))
+            elif command == "download" and self._hostfilename in ftp.nlst():
+                f = open(self._localfile, "w")
+                f.write("")
+                f.close()
+                ftp.retrbinary("RETR %s" % self._hostfilename, self._cb_retr_bin)
+                self._cb_tl(load_tasks_from_file(self._localfile))
+            elif command == "download" and not self._hostfilename in ftp.nlst():
+                f = open(self._localfile, "w")
+                f.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<tasklist>\n</tasklist>')
+                f.close()
+                self._cb_tl(load_tasks_from_file(self._localfile))
+                
+        ftp.quit()
         
-    def _cb_retrline(self, data):
-        f = open(self._tempfilename, "ab")
+    def _cb_retr_bin(self, data):
+        f = open(self._localfile, "ab")
         f.write(data)
         f.close()
         
+    def download(self):
+        self._command_queue.put("download")
         
-class ThreadAdd(threading.Thread):
+    def upload(self):
+        self._command_queue.put("upload")
+        
+    def quit(self):
+        self._command_queue.put("quit")
+        
+        
+class UploadChecker(threading.Thread):
     
-    def __init__(self, tempfilename, hostname, hostdir, username, password, cb_task_added, cb_error, title):
+    _interval = 3
+    
+    def __init__(self, backend, loader):
         threading.Thread.__init__(self)
-        self._tempfilename = tempfilename
-        self._hostname = hostname
-        self._hostdir = hostdir
-        self._username = username
-        self._password = password
-        self._cb_ta = cb_task_added
-        self._cb_te = cb_error
-        self._title = title
+        self._backend = backend
+        self._loader = loader
+        self._quit = threading.Event()
+        self.start()
         
     def run(self):
-        try:
-            tasks = load_tasks(self._tempfilename)
+        while not self._quit.isSet():
+            time.sleep(self._interval)
+            if self._backend.get_needs_upload().isSet():
+                self._loader.upload()
+                self._backend.get_needs_upload().clear()
                 
-            id = hashlib.md5(str(time.time())).hexdigest()
-            tasks[id] = (self._title, False, -1, "")
-            
-            save_tasks(self._tempfilename, tasks)
-            
-            ftp = ftplib.FTP(self._hostname, self._username, self._password)
-            ftp.cwd(self._hostdir)
-            ftp.storbinary("STOR tasks.xml", open(self._tempfilename, "rb"))
-            ftp.quit()
-            
-            self._cb_ta(id, self._title)
-        except:
-            self._cb_te("Error connecting to server.")
-        
-        
-class ThreadRemove(threading.Thread):
-    
-    def __init__(self, tempfilename, hostname, hostdir, username, password, cb_task_removed, cb_error, id):
-        threading.Thread.__init__(self)
-        self._tempfilename = tempfilename
-        self._hostname = hostname
-        self._hostdir = hostdir
-        self._username = username
-        self._password = password
-        self._cb_tr = cb_task_removed
-        self._cb_te = cb_error
-        self._id = id
-        
-    def run(self):
-        try:
-            tasks = load_tasks(self._tempfilename)
-                
-            del tasks[self._id]
-            
-            save_tasks(self._tempfilename, tasks)
-            
-            ftp = ftplib.FTP(self._hostname, self._username, self._password)
-            ftp.cwd(self._hostdir)
-            ftp.storbinary("STOR tasks.xml", open(self._tempfilename, "rb"))
-            ftp.quit()
-            
-            self._cb_tr(self._id)
-        except:
-            self._cb_te("Error connecting to server.")
-        
-        
-class ThreadUpdate(threading.Thread):
-    
-    def __init__(self, tempfilename, hostname, hostdir, username, password, cb_task_updated, cb_error, id, title, done, date, comment):
-        threading.Thread.__init__(self)
-        self._tempfilename = tempfilename
-        self._hostname = hostname
-        self._hostdir = hostdir
-        self._username = username
-        self._password = password
-        self._cb_tu = cb_task_updated
-        self._cb_te = cb_error
-        self._id = id
-        self._title = title
-        self._done = done
-        self._date = date
-        self._comment = comment
-        
-    def run(self):
-        try:
-            tasks = load_tasks(self._tempfilename)
-                
-            tasks[self._id] = (self._title, self._done, self._date, self._comment)
-            
-            save_tasks(self._tempfilename, tasks)
-            
-            ftp = ftplib.FTP(self._hostname, self._username, self._password)
-            ftp.cwd(self._hostdir)
-            ftp.storbinary("STOR tasks.xml", open(self._tempfilename, "rb"))
-            ftp.quit()
-            
-            self._cb_tu(self._id, self._title, self._done, self._date, self._comment)
-        except:
-            self._cb_te("Error connecting to server.")
+    def quit(self):
+        self._quit.set()
     
 
 class FTPTaskBackend(backend.TaskBackend):
@@ -224,23 +149,59 @@ class FTPTaskBackend(backend.TaskBackend):
     def __init__(self, tempfilename, hostname, hostdir, username, password, cb_tasks_loaded, cb_task_added, cb_task_removed, cb_task_updated, cb_task_error):
         backend.TaskBackend.__init__(self, cb_tasks_loaded, cb_task_added, cb_task_removed, cb_task_updated, cb_task_error)
         self._tempfilename = tempfilename
-        self._hostname = hostname
-        self._hostdir = hostdir
-        self._username = username
-        self._password = password
+        self._tasks = {}
+        self._needs_upload = threading.Event()
+        self._loader = FTPLoader(tempfilename, hostname, hostdir, "tasks.xml", username, password, self._cb_tasks_loaded, self._cb_te)
+        self._checker = UploadChecker(self, self._loader)
+            
+    def _cb_tasks_loaded(self, tasks):
+        self._tasks = tasks
+        self._cb_tl(tasks)
         
     def load_tasks(self):
-        t = ThreadLoad(self._tempfilename, self._hostname, self._hostdir, self._username, self._password, self._cb_tl, self._cb_te)
-        t.start()
+        self._loader.download()
     
     def add_task(self, title):
-        t = ThreadAdd(self._tempfilename, self._hostname, self._hostdir, self._username, self._password, self._cb_ta, self._cb_te, title)
-        t.start()
+        id = hashlib.md5(str(time.time())).hexdigest()
+        self._tasks[id] = (title, False, -1, "")
+        self.save_tasks()
+        self._cb_ta(id, title)
         
     def remove_task(self, id):
-        t = ThreadRemove(self._tempfilename, self._hostname, self._hostdir, self._username, self._password, self._cb_tr, self._cb_te, id)
-        t.start()
+        del self._tasks[id]
+        self.save_tasks()
+        self._cb_tr(id)
         
     def update_task(self, id, title, done, date, comment):
-        t = ThreadUpdate(self._tempfilename, self._hostname, self._hostdir, self._username, self._password, self._cb_tu, self._cb_te, id, title, done, date, comment)
-        t.start()
+        self._tasks[id] = (title, done, date, comment)
+        self.save_tasks()
+        self._cb_tu(id, title, done, date, comment)
+    
+    def save_tasks(self):
+        xmldata = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<tasklist>\n'
+        for id, t in self._tasks.iteritems():
+            title, done, date, comment = t
+            if done:
+                done = "1"
+            else:
+                done = "0"
+            taskdata = '\t<task id="%s" done="%s" date="%s">\n' % (id, done, date)
+            taskdata += '\t\t<title>%s</title>\n' % title
+            taskdata += '\t\t<comment>\n%s\n\t\t</comment>\n' % comment
+            taskdata += '\t</task>\n'
+            xmldata += taskdata
+        xmldata += '</tasklist>'
+        f = open(self._tempfilename, "w")
+        f.write(xmldata)
+        f.close()
+        self._needs_upload.set()
+        
+    def get_needs_upload(self):
+        return self._needs_upload
+        
+    def close(self):
+        self.save_tasks()
+        self._loader.upload()
+        self._needs_upload.clear()
+        self._checker.quit()
+        self._loader.quit()

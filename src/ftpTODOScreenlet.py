@@ -248,6 +248,9 @@ class ftpTODOScreenlet(screenlets.Screenlet):
             self._renderer_title.set_property("wrap-mode", pango.WRAP_WORD)
         except:
             pass
+            
+    def on_quit(self):
+        self._backend.close()
 
     def _init_tree(self, vbox):
         sw = gtk.ScrolledWindow()
