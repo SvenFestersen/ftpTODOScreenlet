@@ -196,6 +196,7 @@ class ftpTODOScreenlet(screenlets.Screenlet):
     hostdir = "/"
     login = ("anonymous", "anonymous@")
     _loaded = False
+    _theme_info = None
 
     def __init__ (self, **keyword_args):
         screenlets.Screenlet.__init__(self, width=self.default_width, height=self.default_height, uses_theme=True, is_widget=False, is_sticky=True, **keyword_args)
@@ -245,12 +246,6 @@ class ftpTODOScreenlet(screenlets.Screenlet):
         
     def on_load_theme(self):
         self._theme_info = theme.ThemeInfo(self.theme.path + "/theme.conf")
-        """
-        The following line fixes a bug that makes the widget unusable
-        (does not get focus) if there is no file but theme.conf in the
-        theme's directory.
-        """
-        self.theme["bugfix"] = None
         
     def on_scale (self):
         try:
@@ -338,7 +333,7 @@ class ftpTODOScreenlet(screenlets.Screenlet):
         self._theme_info.draw_background(ctx, self.default_width, self.default_height)
 
     def on_draw_shape (self, ctx):
-        if self.theme:
+        if self._theme_info:
             self.on_draw(ctx)
             
     def _cb_treeview_event(self, widget, event):
