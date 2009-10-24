@@ -1,3 +1,6 @@
+* 24. Oct. 2009, beta3
+  Moved to another theming system and added two white themes.
+
 * 23. Oct. 2009, beta2
   Rewrote the ftp backend to avoid problems when performing to many
   operations.
