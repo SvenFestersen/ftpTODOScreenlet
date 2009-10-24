@@ -31,6 +31,7 @@ import time
 
 import backend
 import backend_ftp
+import theme
 
 
 def color_hex_to_float(color):
@@ -242,6 +243,9 @@ class ftpTODOScreenlet(screenlets.Screenlet):
         gobject.timeout_add(1000, self._cb_update)
         self._loaded = True
         
+    def on_load_theme(self):
+        self._theme_info = theme.ThemeInfo(self.theme.path + "/theme.conf")
+        
     def on_scale (self):
         try:
             self._renderer_title.set_property("wrap-width", self.scale * self.width - 60)
@@ -325,12 +329,7 @@ class ftpTODOScreenlet(screenlets.Screenlet):
 
     def on_draw (self, ctx):
         ctx.scale(self.scale, self.scale)
-        if self.theme:
-            self.theme['background.svg'].render_cairo(ctx)
-        else:
-            ctx.set_source_rgba(0, 0, 0, 0.7)
-            ctx.rectangle(0, 0, self.default_width, self.default_height)
-            ctx.fill()
+        self._theme_info.draw_background(ctx, self.default_width, self.default_height)
 
     def on_draw_shape (self, ctx):
         if self.theme:
